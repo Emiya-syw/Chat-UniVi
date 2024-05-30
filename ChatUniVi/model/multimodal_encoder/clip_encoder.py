@@ -28,7 +28,7 @@ class CLIPVisionTower(nn.Module):
         self.image_eval_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
         self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name)
         self.vision_tower.requires_grad_(False)
-
+        print("Load!")
         self.is_loaded = True
 
     def feature_select(self, image_forward_outs, select_feature='patch'):
