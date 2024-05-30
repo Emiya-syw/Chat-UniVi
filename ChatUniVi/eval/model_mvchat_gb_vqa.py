@@ -3,7 +3,6 @@ import torch
 import os
 import json
 from tqdm import tqdm
-import shortuuid
 from ChatUniVi.constants import *
 from ChatUniVi.conversation import conv_templates, SeparatorStyle
 from ChatUniVi.model.builder import load_pretrained_model
@@ -106,7 +105,7 @@ def _get_rawvideo_dec(video_path, image_processor, max_frames=MAX_IMAGE_LENGTH, 
 
 class long_video_slover():
     def __init__(self, fragment_video_path, vis_processor, device):
-        self.n_segment = 256
+        self.n_segment = 128
         self.fragment_video_path = fragment_video_path
         self.filter_model, self.filter_preprocess = clip.load("../MovieChat/ckpt/ViT-B-32.pt", device=device)
         self.n_frms = 8
@@ -204,9 +203,56 @@ class long_video_slover():
             # sys.exit(0)
             video_fragment_list.append(video_fragment.to(self.device))
         video_fragment_list = torch.cat(video_fragment_list, dim=0)
-        return video_fragment_list, video_fragment_list.shape[0]
+        return video_fragment_list, 1
             
-        
+
+
+def answer(model, conv_mode, qa, tokenizer, video_frames, args):
+    conv = conv_templates[conv_mode].copy()
+    conv.append_message(conv.roles[0], qa)
+    conv.append_message(conv.roles[1], None)
+    prompt = conv.get_prompt()
+
+    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(
+        0).cuda()
+
+    stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
+    keywords = [stop_str]
+    stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
+    # print(input_ids.shape, video_frames.shape) (1 1035) (979 3 224 224)
+    with torch.inference_mode():
+        output_ids = model.generate(
+            input_ids,
+            images=video_frames.half().cuda(),
+            do_sample=True,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            num_beams=args.num_beams,
+            output_scores=True,
+            return_dict_in_generate=True,
+            max_new_tokens=1024,
+            use_cache=True,
+            stopping_criteria=[stopping_criteria])
+
+    output_ids = output_ids.sequences
+    input_token_len = input_ids.shape[1]
+    n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
+    if n_diff_input_output > 0:
+        print(f'[Warning] {n_diff_input_output} output_ids are not the same as the input_ids')
+    outputs = tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)[0]
+    outputs = outputs.strip()
+    if outputs.endswith(stop_str):
+        outputs = outputs[:-len(stop_str)]
+    outputs = outputs.strip()
+    return outputs
+    
+def get_example(questions, questions_featrues, question, filter_model):
+    question = clip.tokenize(question).to("cuda:0")
+    question_features = filter_model.encode_text(question)
+    id = np.random.choice(np.argsort((question_features @ questions_featrues.T).squeeze(0).detach().cpu().numpy())[::-1][2:10])
+    return questions[id]
+  
+
 def eval_model(args):
     # Model
     disable_torch_init()
@@ -242,6 +288,19 @@ def eval_model(args):
     Video_Solver = long_video_slover(fragment_video_path=f'./results/inter_video_{args.chunk_idx}.mp4', vis_processor=image_processor, device='cuda:0')
     # Iterate over each sample in the ground truth file
     count = 0
+
+    filter_model, filter_preprocess = clip.load("../MovieChat/ckpt/ViT-B-32.pt", device="cuda:0")
+    with open("../MovieChat/Outputs/examples_global.json", "r") as f:
+        examples = json.load(f)
+    questions_features = []
+    questions = []
+    for question in examples.keys():
+        questions_features.append(clip.tokenize(question))
+        questions.append(question)
+    questions_features = torch.cat(questions_features, dim=0).to("cuda:0")
+    with torch.no_grad():
+        questions_features = filter_model.encode_text(questions_features)
+
     for file in tqdm(json_files):
         if file.endswith('.json'):
             file_path = os.path.join(args.question_file, file)
@@ -263,55 +322,30 @@ def eval_model(args):
                     for id, qa_key in enumerate(movie_data["global"]):
                         qa = qa_key["question"]
                         video_frames, slice_len = Video_Solver.get_video_features(video_path, qa)
-                        try:
-                            cur_prompt = qa
-                            if model.config.mm_use_im_start_end:
-                                qa = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN * slice_len + DEFAULT_IM_END_TOKEN + '\n' + qa
-                            else:
-                                qa = DEFAULT_IMAGE_TOKEN * slice_len + '\n' + qa
+                        # try:
+                        if model.config.mm_use_im_start_end:
+                            video_token = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN * slice_len + DEFAULT_IM_END_TOKEN
+                        else:
+                            video_token = DEFAULT_IMAGE_TOKEN * slice_len
+                        
+                        prompt = video_token + '\n' + "First, please count the number of fragments in the video. Second, please conclude the fragments in less than 150 words."
+                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames, args=args)
+                        
+                        example_question = get_example(questions, questions_features, qa, filter_model)
+                        example_answer = examples[example_question]
+                        example = "You should follow the format of the example: ```Here is the question: " + example_question + "Answer the question in less than 20 words:" + example_answer + '```\n'
 
-                            conv = conv_templates[args.conv_mode].copy()
-                            conv.append_message(conv.roles[0], qa)
-                            conv.append_message(conv.roles[1], None)
-                            prompt = conv.get_prompt()
+                        prompt = example + video_token + '\n' + f"Here is the description of the video:```{outputs}```. \
+                            Here is the question:```{qa}``` Please answer the question according to the video and description in less than 20 words."
+                            
+                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, image_tensor=image_tensor, args=args)
+                        
 
-                            input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(
-                                0).cuda()
-
-                            stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-                            keywords = [stop_str]
-                            stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
-
-                            with torch.inference_mode():
-                                output_ids = model.generate(
-                                    input_ids,
-                                    images=video_frames.half().cuda(),
-                                    do_sample=True,
-                                    temperature=args.temperature,
-                                    top_p=args.top_p,
-                                    num_beams=args.num_beams,
-                                    output_scores=True,
-                                    return_dict_in_generate=True,
-                                    max_new_tokens=1024,
-                                    use_cache=True,
-                                    stopping_criteria=[stopping_criteria])
-
-                            output_ids = output_ids.sequences
-                            input_token_len = input_ids.shape[1]
-                            n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
-                            if n_diff_input_output > 0:
-                                print(f'[Warning] {n_diff_input_output} output_ids are not the same as the input_ids')
-                            outputs = tokenizer.batch_decode(output_ids[:, input_token_len:], skip_special_tokens=True)[0]
-                            outputs = outputs.strip()
-                            if outputs.endswith(stop_str):
-                                outputs = outputs[:-len(stop_str)]
-                            outputs = outputs.strip()
-
-                            qa_key["pred"] = outputs
-                            global_value.append(qa_key)
-                            print(f"Question:{qa}\nAnswer:"+qa_key["pred"]+"\n")
-                        except Exception as e:
-                            print(f"Error processing video file '{global_key}': {e}")
+                        qa_key["pred"] = outputs
+                        global_value.append(qa_key)
+                        print(f"Question:{qa}\nAnswer:"+qa_key["pred"]+"\n")
+                        # except Exception as e:
+                        #     print(f"Error processing video file '{global_key}': {e}")
 
                     result_data = {}
                     result_data[global_key] = global_value

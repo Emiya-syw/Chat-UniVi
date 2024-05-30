@@ -225,7 +225,9 @@ class ChatUniViMetaForCausalLM(ABC):
             if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
                 attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1), dtype=attention_mask.dtype, device=attention_mask.device)
             return input_ids, attention_mask, past_key_values, None, labels
-
+        image_features_list = []
+        bs = 64
+        image_num = images.shape[0]
         if type(images) is list or images.ndim == 5:
             concat_images = torch.cat([image for image in images], dim=0)
             image_features = self.encode_images(concat_images)
@@ -233,7 +235,11 @@ class ChatUniViMetaForCausalLM(ABC):
             image_features = torch.split(image_features, split_sizes, dim=0)
             image_features = [x.flatten(0, 1) for x in image_features]
         else:
-            image_features = self.encode_images(images)
+            for i in range(0, image_num, bs):
+                image_features = self.encode_images(images[i:i+bs])
+                image_features_list.append(image_features)
+            image_features = torch.cat(image_features_list, dim=0)
+            # print(image_features.shape)
 
         new_input_embeds = []
         new_labels = [] if labels is not None else None
@@ -249,7 +255,7 @@ class ChatUniViMetaForCausalLM(ABC):
                     new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
                 continue
-
+            # 有多少帧就有多少image token
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
 
             cur_new_input_embeds = []
@@ -396,6 +402,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 new_labels = torch.stack(new_labels, dim=0)
 
             if attention_mask is not None:
+                # print(new_input_embeds.shape, input_ids.shape) (1 952 4096) (1 1035)
                 new_attn_mask_pad_left = torch.full((attention_mask.shape[0], new_input_embeds.shape[1] - input_ids.shape[1]), True, dtype=attention_mask.dtype, device=attention_mask.device)
                 attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
                 assert attention_mask.shape == new_input_embeds.shape[:2]
