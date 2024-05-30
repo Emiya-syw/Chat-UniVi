@@ -338,7 +338,7 @@ def eval_model(args):
                         prompt = example + video_token + '\n' + f"Here is the description of the video:```{outputs}```. \
                             Here is the question:```{qa}``` Please answer the question according to the video and description in less than 20 words."
                             
-                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, image_tensor=image_tensor, args=args)
+                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames, args=args)
                         
 
                         qa_key["pred"] = outputs
