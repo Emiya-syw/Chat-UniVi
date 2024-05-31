@@ -176,6 +176,8 @@ def eval_model(args):
                     with open(answers_file, 'a') as output_json_file:
                         output_json_file.write(json.dumps(result_data))
                         output_json_file.write("\n")
+        import sys
+        sys.exit(0)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

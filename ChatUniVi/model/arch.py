@@ -108,6 +108,21 @@ class ChatUniViMetaForCausalLM(ABC):
         x = x + p[:, :x.shape[1], :].to(x.device).to(x.dtype)
         return x
 
+    def merge(self, image_features):
+        image_features_1 = image_features[:-1]
+        image_features_2 = image_features[2:]
+        scores = torch.mean(torch.sum(image_features_1 * image_features_2, dim=1), dim=-1)
+        max_value, max_index = torch.max(scores)
+        image_features_new = torch.zeros((image_features.shape[0]-1, image_features.shape[1], image_features.shape[2])).to(image_features.device)
+        image_features_new[:max_index] = image_features[:max_index]
+        image_features_new[max_index] = 0.5*(image_features[max_index]+image_features[max_index+1])
+        if max_index != image_features.shape[0]-1:
+            image_features_new[max_index+1:] = image_features[max_index+2:]
+        else:
+            pass
+        return image_features_new
+
+
     def project(self, image_features, input_type="image"):
         if self.get_model().use_cluster:
             if input_type == "image":
@@ -240,6 +255,10 @@ class ChatUniViMetaForCausalLM(ABC):
                 image_features_list.append(image_features)
             image_features = torch.cat(image_features_list, dim=0)
             # print(image_features.shape)
+        
+        while image_features.shape[0] > 128:
+            print(image_features.shape)
+            image_features = self.merge(image_features)
 
         new_input_embeds = []
         new_labels = [] if labels is not None else None
