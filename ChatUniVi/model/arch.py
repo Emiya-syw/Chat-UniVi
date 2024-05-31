@@ -108,20 +108,32 @@ class ChatUniViMetaForCausalLM(ABC):
         x = x + p[:, :x.shape[1], :].to(x.device).to(x.dtype)
         return x
 
-    def merge(self, image_features):
-        image_features_1 = image_features[:-1]
-        image_features_2 = image_features[2:]
-        scores = torch.mean(torch.sum(image_features_1 * image_features_2, dim=1), dim=-1)
-        max_value, max_index = torch.max(scores)
+    def merge_max(self, image_features, scores):
+        assert image_features.shape[0] == scores.shape[0] + 1
+        max_value, max_index = torch.max(scores, dim=0)
+
         image_features_new = torch.zeros((image_features.shape[0]-1, image_features.shape[1], image_features.shape[2])).to(image_features.device)
         image_features_new[:max_index] = image_features[:max_index]
         image_features_new[max_index] = 0.5*(image_features[max_index]+image_features[max_index+1])
-        if max_index != image_features.shape[0]-1:
+
+        scores_new = torch.zeros((scores.shape[0]-1)).to(scores.device)
+        scores_new[:max_index] = scores[:max_index]
+
+        if max_index != image_features.shape[0]-2:
             image_features_new[max_index+1:] = image_features[max_index+2:]
+            scores_new[max_index:] = scores[max_index+1:]
         else:
             pass
-        return image_features_new
+        
+        return image_features_new, scores_new
 
+    def merge(self, image_features, num_merge):
+        image_features_1 = image_features[:-1]
+        image_features_2 = image_features[1:]
+        scores = torch.mean(torch.sum(image_features_1 * image_features_2, dim=1), dim=-1)
+        for i in range(num_merge):
+            image_features, scores = self.merge_max(image_features, scores)
+        return image_features
 
     def project(self, image_features, input_type="image"):
         if self.get_model().use_cluster:
@@ -233,33 +245,41 @@ class ChatUniViMetaForCausalLM(ABC):
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
-        self, input_ids, attention_mask, past_key_values, labels, images
+        self, input_ids, attention_mask, past_key_values, labels, images, memory, use_memory
     ):
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
                 attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1), dtype=attention_mask.dtype, device=attention_mask.device)
-            return input_ids, attention_mask, past_key_values, None, labels
-        image_features_list = []
-        bs = 64
-        image_num = images.shape[0]
-        if type(images) is list or images.ndim == 5:
-            concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images)
-            split_sizes = [image.shape[0] for image in images]
-            image_features = torch.split(image_features, split_sizes, dim=0)
-            image_features = [x.flatten(0, 1) for x in image_features]
-        else:
-            for i in range(0, image_num, bs):
-                image_features = self.encode_images(images[i:i+bs])
-                image_features_list.append(image_features)
-            image_features = torch.cat(image_features_list, dim=0)
-            # print(image_features.shape)
+            return input_ids, attention_mask, past_key_values, None, labels, memory
         
-        while image_features.shape[0] > 128:
-            print(image_features.shape)
-            image_features = self.merge(image_features)
+        if not use_memory:
+            image_features_list = []
+            bs = 64
+            image_num = images.shape[0]
 
+            if type(images) is list or images.ndim == 5:
+                concat_images = torch.cat([image for image in images], dim=0)
+                image_features = self.encode_images(concat_images)
+                split_sizes = [image.shape[0] for image in images]
+                image_features = torch.split(image_features, split_sizes, dim=0)
+                image_features = [x.flatten(0, 1) for x in image_features]
+            else:
+                for i in range(0, image_num, bs):
+                    image_features = self.encode_images(images[i:i+bs])
+                    image_features_list.append(image_features)
+                image_features = torch.cat(image_features_list, dim=0)
+                # print(image_features.shape)
+            print("Merge Start!")
+            while image_features.shape[0] > 128:
+                # print(image_features.shape)
+                image_features = self.merge(image_features, 3)
+
+        else:
+            print("Load Tensor!")
+            image_features = memory
+
+        print(image_features.shape)
         new_input_embeds = []
         new_labels = [] if labels is not None else None
         cur_image_idx = 0
@@ -313,7 +333,7 @@ class ChatUniViMetaForCausalLM(ABC):
                         cur_image_features = self.project(cur_image_features, input_type="image")
                         t, l, n = cur_image_features.size()
                         cur_image_features = cur_image_features.contiguous().view(t * l, n)
-
+                    print(t,l,n)
                     if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
                         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start - 1]).detach())
                         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[image_token_start - 1:image_token_start]))
@@ -426,7 +446,7 @@ class ChatUniViMetaForCausalLM(ABC):
                 attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
                 assert attention_mask.shape == new_input_embeds.shape[:2]
 
-        return None, attention_mask, past_key_values, new_input_embeds, new_labels
+        return None, attention_mask, past_key_values, new_input_embeds, new_labels, image_features
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:

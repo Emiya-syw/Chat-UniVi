@@ -29,12 +29,14 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
         self.post_init()
+        self.feature_memory = None
 
     def get_model(self):
         return self.model
 
     def forward(
         self,
+        use_memory: Optional[bool] = None,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
@@ -44,15 +46,20 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         images: Optional[torch.FloatTensor] = None,
-        return_dict: Optional[bool] = None,
+        return_dict: Optional[bool] = None
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images)
+        
+        if not use_memory:
+            input_ids, attention_mask, past_key_values, inputs_embeds, labels, self.feature_memory = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, self.feature_memory, False)
+            assert self.feature_memory is not None
+        else:
+            input_ids, attention_mask, past_key_values, inputs_embeds, labels, self.feature_memory = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, self.feature_memory, True)
+            
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
 
@@ -113,6 +120,7 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
                 "use_cache": kwargs.get("use_cache"),
                 "attention_mask": attention_mask,
                 "images": kwargs.get("images", None),
+                "use_memory": kwargs.get("use_memory", False)
             }
         )
         return model_inputs

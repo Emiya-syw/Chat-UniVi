@@ -125,7 +125,7 @@ class long_video_slover():
         video = CompositeVideoClip([VideoFileClip(video_path).subclip(start_time,end_time)])
         video.write_videofile(self.fragment_video_path)
         
-    def load_video(self, video_path, question, n_frms=8, height=-1, width=-1, sampling="uniform", return_msg = False):
+    def load_video(self, video_path, question_list, n_frms=8, height=-1, width=-1, sampling="uniform", return_msg = False):
         decord.bridge.set_bridge("torch")
         vr = VideoReader(uri=video_path, height=height, width=width)
 
@@ -145,52 +145,50 @@ class long_video_slover():
 
             interval = 2
             
-            indices = np.arange(start, end, vlen / (n_frms/2)).astype(int).tolist() 
-            indices_finegrained = np.arange(start, end, interval).astype(int).tolist() 
+            global_indices = np.arange(start, end, vlen / (n_frms/2)).astype(int).tolist() 
+            indices_for_sampling = np.arange(start, end, interval).astype(int).tolist() 
             
-            patch_images = [Image.fromarray(f) for f in vr.get_batch(indices_finegrained).numpy()]
+            patch_images = [Image.fromarray(f) for f in vr.get_batch(indices_for_sampling).numpy()]
 
             video_fragment = [self.filter_preprocess(frm).unsqueeze(0) for frm in patch_images]#.to(self.device).permute(1,0,2,3)
             video_fragment = torch.cat(video_fragment, dim=0).to(self.device)
             # print(video_fragment.shape) T 3 224 224 
-            tokenize_text = clip.tokenize(question).to(self.device)
-            with torch.no_grad():
-                logits_per_image, logits_per_text = self.filter_model(video_fragment, tokenize_text)
-                probs = logits_per_text.softmax(dim=-1).cpu().numpy().reshape(-1)
-                indices_question = np.argsort(probs)[::-1][:int(n_frms/2)]
-                indices_finegrained = indices_question * interval
-                indices.extend(indices_finegrained)
-                indices = list(dict.fromkeys(indices))
-                    
-            indices.sort()
+            frms_list = []
+            for question in question_list:
+                tokenize_text = clip.tokenize(question).to(self.device)
+                with torch.no_grad():
+                    logits_per_image, logits_per_text = self.filter_model(video_fragment, tokenize_text)
+                    probs = logits_per_text.softmax(dim=-1).cpu().numpy().reshape(-1)
+                    indices_question = np.argsort(probs)[::-1][:int(n_frms/2)]
+                    clip_indices = indices_question * interval
+
+                    temp_indices = global_indices + clip_indices.tolist()
+                    # temp_indices = list(dict.fromkeys(temp_indices))
+                    temp_indices.sort()
+                    patch_images = [Image.fromarray(f) for f in vr.get_batch(temp_indices).numpy()]
+                    frms = torch.stack([self.vis_processor.preprocess(frm, return_tensors='pt')['pixel_values'][0] for frm in patch_images])
+                    frms_list.append(frms.unsqueeze(0))
+            frms = torch.cat(frms_list, dim=0)
+            return frms
             
         else:
             raise NotImplementedError
 
-        # get_batch -> T, H, W, C
-        # temp_frms = vr.get_batch(indices)
-        # tensor_frms = torch.from_numpy(temp_frms) if type(temp_frms) is not torch.Tensor else temp_frms
-        # frms = tensor_frms.permute(3, 0, 1, 2).float()  # (C, T, H, W)
         patch_images = [Image.fromarray(f) for f in vr.get_batch(indices).numpy()]
         frms = torch.stack([self.vis_processor.preprocess(frm, return_tensors='pt')['pixel_values'][0] for frm in patch_images])
-        # if not return_msg:
-        #     return frms
-
-        # fps = float(vr.get_avg_fps())
-        # sec = ", ".join([str(round(f / fps, 1)) for f in indices])
-        # # " " should be added in the start and end
-        # msg = f"The video contains {len(indices)} frames sampled at {sec} seconds. "
-        return frms
+        return frms.unsqueeze(0)
     
-    def get_video_features(self, video_path, question):
+    def get_video_features(self, video_path, question_list):
         video_length = video_duration(video_path)
         video_fragment_list = []
         for i in range(self.n_segment):
             print(i)
+            # if i > 1:
+            #     continue
             video_fragment = self.parse_video_fragment(video_path, video_length, i, self.n_segment)
             video_fragment = self.load_video(
                     video_path=self.fragment_video_path,
-                    question=question,
+                    question_list=question_list,
                     n_frms=self.n_frms, 
                     height=224,
                     width=224,
@@ -202,19 +200,18 @@ class long_video_slover():
             # import sys
             # sys.exit(0)
             video_fragment_list.append(video_fragment.to(self.device))
-        video_fragment_list = torch.cat(video_fragment_list, dim=0)
-        return video_fragment_list, 1
+        video_fragment = torch.cat(video_fragment_list, dim=1)
+        return video_fragment, 1
             
 
 
-def answer(model, conv_mode, qa, tokenizer, video_frames, args):
+def answer(model, conv_mode, qa, tokenizer, video_frames, args, use_memory):
     conv = conv_templates[conv_mode].copy()
     conv.append_message(conv.roles[0], qa)
     conv.append_message(conv.roles[1], None)
     prompt = conv.get_prompt()
 
-    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(
-        0).cuda()
+    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
 
     stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
     keywords = [stop_str]
@@ -223,6 +220,7 @@ def answer(model, conv_mode, qa, tokenizer, video_frames, args):
     with torch.inference_mode():
         output_ids = model.generate(
             input_ids,
+            use_memory=use_memory,
             images=video_frames.half().cuda(),
             do_sample=True,
             temperature=args.temperature,
@@ -232,7 +230,8 @@ def answer(model, conv_mode, qa, tokenizer, video_frames, args):
             return_dict_in_generate=True,
             max_new_tokens=1024,
             use_cache=True,
-            stopping_criteria=[stopping_criteria])
+            stopping_criteria=[stopping_criteria]
+            )
 
     output_ids = output_ids.sequences
     input_token_len = input_ids.shape[1]
@@ -288,6 +287,8 @@ def eval_model(args):
     Video_Solver = long_video_slover(fragment_video_path=f'./results/inter_video_{args.chunk_idx}.mp4', vis_processor=image_processor, device='cuda:0')
     # Iterate over each sample in the ground truth file
     count = 0
+    ###
+    # outputs = answer(model=model, conv_mode=args.conv_mode, qa="prompt", tokenizer=tokenizer, video_frames=torch.zeros((1,3,224,224)), args=args, use_memory=False)
 
     filter_model, filter_preprocess = clip.load("../MovieChat/ckpt/ViT-B-32.pt", device="cuda:0")
     with open("../MovieChat/Outputs/examples_global.json", "r") as f:
@@ -319,17 +320,24 @@ def eval_model(args):
                     #     else:
                     #         video_frames, slice_len = _get_rawvideo_dec(video_path, image_processor, max_frames=MAX_IMAGE_LENGTH)
                     global_value = []
+                    qa_list = []
                     for id, qa_key in enumerate(movie_data["global"]):
                         qa = qa_key["question"]
-                        video_frames, slice_len = Video_Solver.get_video_features(video_path, qa)
-                        # try:
+                        qa_list.append(qa)
+
+                    video_frames, slice_len = Video_Solver.get_video_features(video_path, qa_list)
+
+                    for id, qa_key in enumerate(movie_data["global"]):
+                        qa = qa_key["question"]
                         if model.config.mm_use_im_start_end:
                             video_token = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN * slice_len + DEFAULT_IM_END_TOKEN
                         else:
                             video_token = DEFAULT_IMAGE_TOKEN * slice_len
                         
+                        print(video_frames.shape)
+
                         prompt = video_token + '\n' + "First, please count the number of fragments in the video. Second, please conclude the fragments in less than 150 words."
-                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames, args=args)
+                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames[id], args=args, use_memory=False)
                         
                         example_question = get_example(questions, questions_features, qa, filter_model)
                         example_answer = examples[example_question]
@@ -337,15 +345,13 @@ def eval_model(args):
 
                         prompt = example + video_token + '\n' + f"Here is the description of the video:```{outputs}```. \
                             Here is the question:```{qa}``` Please answer the question according to the video and description in less than 20 words."
-                            
-                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames, args=args)
+                        
+                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames[id], args=args, use_memory=True)
                         
 
                         qa_key["pred"] = outputs
                         global_value.append(qa_key)
                         print(f"Question:{qa}\nAnswer:"+qa_key["pred"]+"\n")
-                        # except Exception as e:
-                        #     print(f"Error processing video file '{global_key}': {e}")
 
                     result_data = {}
                     result_data[global_key] = global_value
