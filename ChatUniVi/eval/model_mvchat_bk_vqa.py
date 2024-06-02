@@ -44,7 +44,7 @@ def get_sorted_files(directory, pattern="*9.MP4*"):
     
     return files
 
-def answer(model, conv_mode, qa, tokenizer, image_tensor, args):
+def answer(model, conv_mode, qa, tokenizer, image_tensor, args, use_memory):
     conv = conv_templates[conv_mode].copy()
     conv.append_message(conv.roles[0], qa)
     conv.append_message(conv.roles[1], None)
@@ -60,6 +60,7 @@ def answer(model, conv_mode, qa, tokenizer, image_tensor, args):
     with torch.inference_mode():
         output_ids = model.generate(
             input_ids,
+            use_memory=use_memory,
             images=image_tensor.unsqueeze(0).half().cuda(),
             do_sample=True,
             temperature=args.temperature,
@@ -154,18 +155,18 @@ def eval_model(args):
                         else:
                             image_token = DEFAULT_IMAGE_TOKEN
                             
-                        prompt = image_token + '\n' + "Please describe the image in less than 50 words."
+                        prompt = image_token + '\n' + "Please describe the frame of the video in less than 50 words."
 
-                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, image_tensor=image_tensor, args=args)
+                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, image_tensor=image_tensor, args=args, use_memory=False)
                         
                         example_question = get_example(questions, questions_features, qa, filter_model)
                         example_answer = examples[example_question]
                         example = "You should follow the format of the example: ```Here is the question: " + example_question + "Answer the question in less than 20 words:" + example_answer + '```\n'
                         
-                        prompt = example + image_token + '\n' + f"Here is the description of the image:```{outputs}```. \
-                            Here is the question:```{qa}``` Please answer the question according to the image and description in less than 20 words."
+                        prompt = example + image_token + '\n' + f"Here is the description of the frame of the video:```{outputs}```. \
+                            Here is the question:```{qa}``` Please answer the question according to the frame of the video and description in less than 20 words."
                             
-                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, image_tensor=image_tensor, args=args)
+                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, image_tensor=image_tensor, args=args, use_memory=True)
                         
                         qa_key["pred"] = outputs
                         global_value.append(qa_key)
@@ -176,8 +177,8 @@ def eval_model(args):
                     with open(answers_file, 'a') as output_json_file:
                         output_json_file.write(json.dumps(result_data))
                         output_json_file.write("\n")
-        import sys
-        sys.exit(0)
+        # import sys
+        # sys.exit(0)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

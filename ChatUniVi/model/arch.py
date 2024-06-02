@@ -270,10 +270,10 @@ class ChatUniViMetaForCausalLM(ABC):
                     image_features_list.append(image_features)
                 image_features = torch.cat(image_features_list, dim=0)
                 # print(image_features.shape)
-            print("Merge Start!")
-            while image_features.shape[0] > 128:
-                # print(image_features.shape)
-                image_features = self.merge(image_features, 3)
+            # print("Merge Start!")
+            # while image_features.shape[0] > 128:
+            #     # print(image_features.shape)
+            #     image_features = self.merge(image_features, 3)
 
         else:
             print("Load Tensor!")
