@@ -108,7 +108,7 @@ class long_video_slover():
     def __init__(self, fragment_video_path, vis_processor, device):
         self.fragment_video_path = fragment_video_path
         self.filter_model, self.filter_preprocess = clip.load("../MovieChat/ckpt/ViT-B-32.pt", device=device)
-        self.n_frms = 48
+        self.n_frms = 16
         self.device = device
         self.vis_processor = vis_processor
         
@@ -148,7 +148,7 @@ class long_video_slover():
             
             cur_frame = vlen // 2
             
-            global_indices = np.arange(start, end, vlen / (n_frms/2)).astype(int).tolist() 
+            # global_indices = np.arange(start, end, vlen / (n_frms/2)).astype(int).tolist() 
             
             indices_for_sampling = np.arange(start, end, interval).astype(int).tolist() 
             patch_images = [Image.fromarray(f) for f in vr.get_batch(indices_for_sampling).numpy()]
@@ -163,13 +163,13 @@ class long_video_slover():
                 
                 image_features = self.filter_model.encode_image(video_fragment)
                 probs_image = (image_features @ image_features.T)[int(cur_frame/interval),:].softmax(dim=-1).cpu().numpy().reshape(-1)
-                indices_image = np.argsort(probs_image)[::-1][:int(n_frms)]
+                indices_image = np.argsort(probs_image)[::-1][:int(n_frms*2)]
                 
                 probs = probs[indices_image]
-                indices_question = np.argsort(probs)[::-1][:int(n_frms/2)]
+                indices_question = np.argsort(probs)[::-1][:int(n_frms)]
                 clip_indices = indices_question * interval
                 
-                temp_indices = global_indices + clip_indices.tolist()
+                temp_indices = clip_indices.tolist()
                 # temp_indices = list(dict.fromkeys(temp_indices))
                 temp_indices.sort()
                 patch_images = [Image.fromarray(f) for f in vr.get_batch(temp_indices).numpy()]
@@ -185,9 +185,9 @@ class long_video_slover():
     def get_video_features(self, video_path, question, cur_frame, total_frame):
         video_length = video_duration(video_path)
         video_fragment = self.capture_video_single(video_path=video_path, cur_frame=cur_frame, half_range=50, total_frame=total_frame, video_length=video_length)
-        video_fragment = self.self.load_video(
+        video_fragment = self.load_video(
                     video_path=self.fragment_video_path,
-                    question_list=question,
+                    question=question,
                     n_frms=self.n_frms, 
                     height=224,
                     width=224,
@@ -316,6 +316,9 @@ def eval_model(args):
                         qa = qa_key["question"]
                         cur_frame = qa_key["time"]
                         cur_frame = cur_frame / fps * fps_video
+                        print(cur_frame)
+                        if int(cur_frame) == int(num_frame):
+                            cur_frame = cur_frame - 1
 
                         video_frames, slice_len = Video_Solver.get_video_features(video_path, qa, cur_frame, num_frame)
 
@@ -338,6 +341,11 @@ def eval_model(args):
                         
                         outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames, args=args, use_memory=True)
                         
+                        # prompt = example + video_token + '\n' + f" \
+                        #     Here is the question:```{qa}``` Please answer the question according to the video in less than 20 words."
+                        
+                        # outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames, args=args, use_memory=False)
+                        
 
                         qa_key["pred"] = outputs
                         global_value.append(qa_key)
@@ -349,8 +357,6 @@ def eval_model(args):
                         output_json_file.write(json.dumps(result_data))
                         output_json_file.write("\n")
                         
-            import sys
-            sys.exit(0)
 
 
 if __name__ == "__main__":
