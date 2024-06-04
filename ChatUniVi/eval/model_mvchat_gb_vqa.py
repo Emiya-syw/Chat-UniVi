@@ -358,6 +358,8 @@ def eval_model(args):
                     with open(answers_file, 'a') as output_json_file:
                         output_json_file.write(json.dumps(result_data))
                         output_json_file.write("\n")
+        if count == 5:
+            break
 
 
 if __name__ == "__main__":
