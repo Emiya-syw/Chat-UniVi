@@ -108,7 +108,7 @@ class long_video_slover():
         self.n_segment = 128
         self.fragment_video_path = fragment_video_path
         self.filter_model, self.filter_preprocess = clip.load("../MovieChat/ckpt/ViT-B-32.pt", device=device)
-        self.n_frms = 8
+        self.n_frms = 4
         self.device = device
         self.vis_processor = vis_processor
         
@@ -217,21 +217,38 @@ def answer(model, conv_mode, qa, tokenizer, video_frames, args, use_memory):
     keywords = [stop_str]
     stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
     # print(input_ids.shape, video_frames.shape) (1 1035) (979 3 224 224)
-    with torch.inference_mode():
-        output_ids = model.generate(
-            input_ids,
-            use_memory=use_memory,
-            images=video_frames.half().cuda(),
-            do_sample=True,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            num_beams=args.num_beams,
-            output_scores=True,
-            return_dict_in_generate=True,
-            max_new_tokens=1024,
-            use_cache=True,
-            stopping_criteria=[stopping_criteria]
-            )
+    if video_frames is None:
+        with torch.inference_mode():
+            output_ids = model.generate(
+                input_ids,
+                use_memory=use_memory,
+                images=None,
+                do_sample=True,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                num_beams=args.num_beams,
+                output_scores=True,
+                return_dict_in_generate=True,
+                max_new_tokens=1024,
+                use_cache=True,
+                stopping_criteria=[stopping_criteria]
+                )
+    else:
+        with torch.inference_mode():
+            output_ids = model.generate(
+                input_ids,
+                use_memory=use_memory,
+                images=video_frames.half().cuda(),
+                do_sample=True,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                num_beams=args.num_beams,
+                output_scores=True,
+                return_dict_in_generate=True,
+                max_new_tokens=1024,
+                use_cache=True,
+                stopping_criteria=[stopping_criteria]
+                )
 
     output_ids = output_ids.sequences
     input_token_len = input_ids.shape[1]
@@ -324,6 +341,7 @@ def eval_model(args):
                     for id, qa_key in enumerate(movie_data["global"]):
                         qa = qa_key["question"]
                         qa_list.append(qa)
+                        
 
                     video_frames, slice_len = Video_Solver.get_video_features(video_path, qa_list)
 
@@ -335,21 +353,32 @@ def eval_model(args):
                             video_token = DEFAULT_IMAGE_TOKEN * slice_len
                         
                         print(video_frames.shape)
-
-                        prompt = video_token + '\n' + "First, please count the number of fragments in the video. Second, please conclude the fragments in less than 150 words."
-                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames[id], args=args, use_memory=False)
                         
+                        # analyse the question
+                        prompt = "You should follow the example: ```Here is the question: When does the video take place? Nowadays or ancient times? \
+                            What key information is needed to answer this question? Please answer it in less than 10 words: Pay attention to the era.```\n\
+                            Here is the question: ```" + qa + "``` What key information is needed to answer this question? Please answer it in less than 10 words."
+                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=None, args=args, use_memory=False)
+                        
+                        # if qa == "When does the video take place? Nowadays or ancient times?" or qa == "When does it happen in the video, ancient age, modern age or future?":
+                        #     outputs += "Ancient times are determined by the existence of dinosaurs. Other animals live in modern times"
+                            
+                        # describe the video
+                        prompt = video_token + '\n' + "There are several segments which contain different objects and events in the video. Please describe the video in 100 words. Here is the cue:" + outputs     
+                        outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames[id], args=args, use_memory=False)
+                        description = outputs
+                        print(outputs)
+                        # answer the question
                         example_question = get_example(questions, questions_features, qa, filter_model)
                         example_answer = examples[example_question]
                         example = "You should follow the format of the example: ```Here is the question: " + example_question + "Answer the question in less than 20 words:" + example_answer + '```\n'
-
                         prompt = example + video_token + '\n' + f"Here is the description of the video:```{outputs}```. \
                             Here is the question:```{qa}``` Please answer the question according to the video and description in less than 20 words."
-                        
                         outputs = answer(model=model, conv_mode=args.conv_mode, qa=prompt, tokenizer=tokenizer, video_frames=video_frames[id], args=args, use_memory=True)
-                        
 
                         qa_key["pred"] = outputs
+                        # qa_key["cue"] = cue
+                        # qa_key["description"] = description
                         global_value.append(qa_key)
                         print(f"Question:{qa}\nAnswer:"+qa_key["pred"]+"\n")
 
@@ -358,7 +387,7 @@ def eval_model(args):
                     with open(answers_file, 'a') as output_json_file:
                         output_json_file.write(json.dumps(result_data))
                         output_json_file.write("\n")
-        if count == 5:
+        if count == 1:
             break
 
 

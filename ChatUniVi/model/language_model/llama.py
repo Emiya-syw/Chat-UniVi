@@ -56,7 +56,6 @@ class ChatUniViLlamaForCausalLM(LlamaForCausalLM, ChatUniViMetaForCausalLM):
         
         if not use_memory:
             input_ids, attention_mask, past_key_values, inputs_embeds, labels, self.feature_memory = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, self.feature_memory, False)
-            assert self.feature_memory is not None
         else:
             input_ids, attention_mask, past_key_values, inputs_embeds, labels, self.feature_memory = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, self.feature_memory, True)
             
